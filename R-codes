@@ -1,501 +1,809 @@
-##############################################
-# 0. PACKAGES
-##############################################
-# install.packages(c("tidyverse","readxl","ggpubr",
-#                    "lme4","lmerTest","emmeans"))
+################################################################################
+# FINAL MDV ANALYSIS
+################################################################################
 
-library(tidyverse)
-library(readxl)
-library(ggpubr)
-library(lme4)
-library(lmerTest)
-library(emmeans)
+# ==============================================================================
+# 1. USER SETTINGS
+# ==============================================================================
 
-##############################################
-# 1. LOAD DATA
-##############################################
-liver  <- read_excel("20260413_Liver MDV data compiled.xlsx")
-spleen <- read_excel("20260413_Spleen MDV data compiled.xlsx")
+input_file <- "MDV_Cytokine_Combined_Analysis_Data.xlsx"
+input_sheet <- "Combined_Data"
 
-liver  <- liver  %>% rename(SampleName = 1)
-spleen <- spleen %>% rename(SampleName = 1)
+results_dir <- "MDV_Final_Analysis_Results"
+dir.create(results_dir, showWarnings = FALSE, recursive = TRUE)
 
-##############################################
-# 2. HELPER: MEAN OF REPLICATES
-##############################################
-row_mean <- function(df, prefix){
-  cols <- grep(paste0("^", prefix), names(df), value = TRUE)
-  rowMeans(df[, cols], na.rm = TRUE)
-}
-
-##############################################
-# 3. CREATE SAMPLE-LEVEL DATA (CRITICAL)
-##############################################
-prepare <- function(df, tissue){
-  df %>%
-    mutate(
-      Tissue = tissue,
-      Group = ifelse(grepl("^N-", SampleName), "Control", "Affected"),
-      MDV  = row_mean(., "MDV_"),
-      IFNG = row_mean(., "IFNG_"),
-      IL2  = row_mean(., "IL2_"),
-      IL4  = row_mean(., "IL4_"),
-      IL6  = row_mean(., "IL6_"),
-      IL10 = row_mean(., "IL10_"),
-      IL17 = row_mean(., "IL17_")
-    ) %>%
-    select(SampleName, Tissue, Group, MDV, IFNG, IL2, IL4, IL6, IL10, IL17)
-}
-
-liver_p  <- prepare(liver,  "Liver")
-spleen_p <- prepare(spleen, "Spleen")
-
-combined <- bind_rows(liver_p, spleen_p)
-
-##############################################
-# 4. DEFINE STAGE (BASED ON LIVER ONLY)
-##############################################
-liver_stage <- liver_p %>%
-  mutate(Stage = case_when(
-    Group == "Control" ~ "Control",
-    MDV < 2000 ~ "Latent",
-    TRUE ~ "Clinical"
-  )) %>%
-  select(SampleName, Stage)
-
-combined <- combined %>%
-  left_join(liver_stage, by = "SampleName")
-
-table(combined$Stage)   # sanity check
-
-##############################################
-# 5. LOG TRANSFORM MDV (HANDLE VARIATION)
-##############################################
-combined <- combined %>%
-  mutate(log_MDV = log10(MDV + 1))
-
-##############################################
-# 6. MDV COMPARISON (LIVER vs SPLEEN)
-##############################################
-mdv_wide <- combined %>%
-  select(SampleName, Tissue, log_MDV) %>%
-  pivot_wider(names_from = Tissue, values_from = log_MDV)
-
-# Paired test
-wilcox.test(mdv_wide$Liver, mdv_wide$Spleen, paired = TRUE)
-
-# Plot
-ggpaired(mdv_wide, cond1 = "Liver", cond2 = "Spleen",
-         ylab = "Log10 MDV Load") +
-  theme_bw()
-
-##############################################
-# 7. BAR PLOTS (MEAN ± SEM)
-##############################################
-cytokines <- c("IFNG","IL2","IL4","IL6","IL10","IL17")
-
-plot_bar <- function(df, marker){
-  
-  df %>%
-    group_by(Tissue, Stage) %>%
-    summarise(
-      mean = mean(.data[[marker]], na.rm = TRUE),
-      sem  = sd(.data[[marker]], na.rm = TRUE)/sqrt(n()),
-      .groups = "drop"
-    ) %>%
-    
-    ggplot(aes(x = Stage, y = mean, fill = Stage)) +
-    geom_bar(stat = "identity", position = "dodge") +
-    geom_errorbar(aes(ymin = mean - sem, ymax = mean + sem),
-                  width = 0.2) +
-    facet_wrap(~Tissue, scales = "free_y") +
-    ggtitle(marker) +
-    theme_bw()
-}
-
-# Example plots
-plot_bar(combined, "IL10")
-plot_bar(combined, "IL6")
-
-##############################################
-# 8. CYTOKINE DIFFERENCE BY GROUP
-##############################################
-cyto_long <- combined %>%
-  pivot_longer(cols = all_of(cytokines),
-               names_to = "Cytokine",
-               values_to = "Expression")
-
-ggboxplot(cyto_long, x = "Stage", y = "Expression",
-          color = "Stage", add = "jitter") +
-  facet_grid(Tissue ~ Cytokine, scales = "free_y") +
-  theme_bw()
-
-##############################################
-# 9. SCATTER: CYTOKINE vs VIRAL LOAD
-##############################################
-plot_scatter <- function(marker){
-  
-  ggscatter(combined,
-            x = "log_MDV",
-            y = marker,
-            color = "Tissue",
-            add = "reg.line") +
-    stat_cor(method = "spearman") +
-    ggtitle(paste(marker, "vs Viral Load")) +
-    theme_bw()
-}
-
-plot_scatter("IL10")
-plot_scatter("IL6")
-plot_scatter("IFNG")
-plot_scatter("IL2")
-plot_scatter("IL4")
-plot_scatter("IL17")
-##############################################
-# 10. MIXED MODEL (ROBUST ANALYSIS)
-##############################################
-models <- lapply(cytokines, function(cyto){
-  
-  model <- lmer(
-    as.formula(paste0(cyto, " ~ scale(log_MDV) + Tissue + (1|SampleName)")),
-    data = combined
-  )
-  
-  summary(model)
-})
-
-##############################################
-# 11. KEY MARKER MODEL
-##############################################
-full_model <- lmer(
-  scale(log_MDV) ~ IFNG + IL2 + IL4 + IL6 + IL10 + IL17 +
-    Tissue + (1|SampleName),
-  data = combined
+show_demonstration_disclaimer <- TRUE
+cytokine_data_status <- paste(
+  "Cytokine values are simulated GAPDH-normalized demonstration data;",
+  "technical triplicates were averaged before analysis."
 )
 
-summary(full_model)
+# ==============================================================================
+# 2. PACKAGES
+# ==============================================================================
 
-##############################################
-# END
-##############################################
-Figure 1: MDV load comparison Liver vs Spleen, log scale
+required_packages <- c(
+  "dplyr", "tidyr", "ggplot2", "readxl", "stringr", "purrr",
+  "tibble", "forcats", "readr", "lme4", "pheatmap",
+  "RColorBrewer", "writexl"
+)
 
-mdv_plot <- ggpaired(mdv_wide, cond1 = "Liver", cond2 = "Spleen",
-                     ylab = "Log10 MDV load",
-                     line.color = "gray70") +
-  stat_compare_means(paired = TRUE, method = "wilcox.test") +
-  theme_classic(base_size = 14)
+missing_packages <- setdiff(required_packages, rownames(installed.packages()))
+if (length(missing_packages) > 0) {
+  install.packages(missing_packages, repos = "https://cloud.r-project.org")
+}
+invisible(lapply(required_packages, library, character.only = TRUE))
 
-mdv_plot
+# ==============================================================================
+# 3. HELPER FUNCTIONS
+# ==============================================================================
 
-Figure 2: Cytokine expression Bar ± SEM
-library(patchwork)
-
-make_bar <- function(marker){
-  combined %>%
-    group_by(Tissue, Stage) %>%
-    summarise(mean = mean(.data[[marker]], na.rm = TRUE),
-              sem  = sd(.data[[marker]], na.rm = TRUE)/sqrt(n()),
-              .groups = "drop") %>%
-    
-    ggplot(aes(Stage, mean, fill = Stage)) +
-    geom_col(width = 0.7) +
-    geom_errorbar(aes(ymin = mean - sem, ymax = mean + sem), width = 0.2) +
-    facet_wrap(~Tissue, scales = "free_y") +
-    labs(title = marker, y = "Expression (normalized)") +
-    theme_classic(base_size = 13) +
-    theme(legend.position = "none")
+mean_or_na <- function(x) {
+  x <- suppressWarnings(as.numeric(x))
+  if (all(is.na(x))) return(NA_real_)
+  mean(x, na.rm = TRUE)
 }
 
-fig2 <- (make_bar("IL10") | make_bar("IL6")) /
-  (make_bar("IL4")  | make_bar("IFNG"))
-
-fig2
-
-
-
-Figure 3: Cytokine vs viral load scatter
-make_scatter <- function(marker){
-  ggplot(combined, aes(log_MDV, .data[[marker]], color = Tissue)) +
-    geom_point(size = 2) +
-    geom_smooth(method = "lm", se = TRUE) +
-    stat_cor(method = "spearman") +
-    labs(x = "Log10 MDV load", y = marker) +
-    theme_classic(base_size = 13)
+cv_percent <- function(x) {
+  x <- suppressWarnings(as.numeric(x))
+  if (sum(!is.na(x)) < 2 || mean(x, na.rm = TRUE) == 0) return(NA_real_)
+  100 * sd(x, na.rm = TRUE) / mean(x, na.rm = TRUE)
 }
 
-fig3 <- (make_scatter("IL10") | make_scatter("IL6")) /
-  (make_scatter("IL4")  | make_scatter("IFNG"))
+format_p <- function(p) {
+  dplyr::case_when(
+    is.na(p) ~ "NA",
+    p < 0.001 ~ "<0.001",
+    TRUE ~ formatC(p, format = "f", digits = 3)
+  )
+}
 
-fig3
+save_plot <- function(plot_object, file_stem, width, height) {
+  pdf_device <- if (capabilities("cairo")) grDevices::cairo_pdf else grDevices::pdf
 
-Figure 4: Heatmap Affected samples only
-
-library(pheatmap)
-
-heat <- combined %>%
-  filter(Stage != "Control") %>%
-  column_to_rownames("SampleName") %>%
-  select(IFNG, IL2, IL4, IL6, IL10, IL17)
-
-pheatmap(scale(heat),
-         clustering_method = "complete",
-         fontsize = 10)
-##############################################
-# HEATMAP (ROBUST VERSION)
-##############################################
-
-# Ensure required columns exist
-cytokines <- c("IFNG","IL2","IL4","IL6","IL10","IL17")
-
-# Remove duplicates (same sample appearing twice for liver/spleen)
-heat_df <- combined %>%
-  filter(Stage != "Control") %>%
-  group_by(SampleName) %>%
-  summarise(across(all_of(cytokines), mean, na.rm = TRUE), .groups = "drop")
-
-# Convert to matrix safely
-heat_mat <- heat_df %>%
-  column_to_rownames("SampleName") %>%
-  as.matrix()
-
-# Check before plotting
-print(dim(heat_mat))
-print(head(heat_mat))
-
-# Plot heatmap
-pheatmap(scale(heat_mat),
-         clustering_method = "complete",
-         fontsize = 10)
-Figure 1
-##############################################
-# FIGURE 1A: COLLAPSED OUTSIDE LABELS
-##############################################
-
-library(dplyr)
-library(ggplot2)
-
-combined$Tissue <- factor(combined$Tissue, levels = c("Liver","Spleen"))
-
-# ---- STEP 1: Prepare label data ----
-label_df <- combined %>%
-  filter(Tissue == "Spleen") %>%
-  
-  # round y to group nearby points (adjust digits if needed)
-  mutate(y_round = round(log_MDV, 2)) %>%
-  
-  # group and collapse sample IDs
-  group_by(y_round) %>%
-  summarise(
-    log_MDV = mean(log_MDV),
-    labels = paste(SampleName, collapse = ", "),
-    .groups = "drop"
+  ggsave(
+    file.path(results_dir, paste0(file_stem, ".pdf")),
+    plot_object,
+    width = width,
+    height = height,
+    units = "in",
+    device = pdf_device,
+    bg = "white"
   )
 
-# ---- PLOT ----
-fig1A <- ggplot(combined,
-                aes(x = Tissue, y = log_MDV, group = SampleName)) +
-  
-  geom_line(color = "gray70", alpha = 0.6, linewidth = 0.5) +
-  
-  geom_point(aes(fill = Tissue),
-             shape = 21, size = 3,
-             position = position_jitter(width = 0.08)) +
-  
-  geom_boxplot(width = 0.5, alpha = 0.25,
-               outlier.shape = NA) +
-  
-  stat_compare_means(paired = TRUE, method = "wilcox.test",
-                     label = "p.format") +
-  
-  # 🔑 OUTSIDE COLLAPSED LABELS
-  geom_text(data = label_df,
-            aes(x = 2.3, y = log_MDV, label = labels),
-            inherit.aes = FALSE,
-            size = 2.8,
-            hjust = 0) +
-  
-  expand_limits(x = 2.5) +
-  
-  labs(
-    x = NULL,
-    y = "Log10 MDV copy number",
-    title = "Paired comparison of MDV load",
-    subtitle = "Sample IDs grouped and shown outside (Spleen side)"
-  ) +
-  
-  coord_cartesian(clip = "off") +
-  
-  theme_classic(base_size = 13) +
+  ggsave(
+    file.path(results_dir, paste0(file_stem, ".png")),
+    plot_object,
+    width = width,
+    height = height,
+    units = "in",
+    dpi = 600,
+    bg = "white"
+  )
+}
+
+publication_theme <- theme_classic(base_size = 11) +
   theme(
-    plot.margin = margin(5.5, 100, 5.5, 5.5),
-    legend.position = "none"
+    plot.title = element_text(face = "bold", size = 14, hjust = 0.5),
+    plot.subtitle = element_text(size = 10, hjust = 0.5),
+    plot.caption = element_text(size = 8, hjust = 0),
+    strip.background = element_rect(fill = "white", colour = "black", linewidth = 0.6),
+    strip.text = element_text(face = "bold"),
+    axis.title = element_text(face = "bold"),
+    axis.text = element_text(colour = "black"),
+    legend.title = element_text(face = "bold"),
+    panel.grid.major.y = element_line(colour = "grey90", linewidth = 0.3),
+    panel.grid.minor = element_blank()
   )
 
-fig1A
-##############################################
-# FIGURE 1: CLEAR PAIRED MDV COMPARISON
-##############################################
+# ==============================================================================
+# 4. READ THE CONSOLIDATED DATA
+# ==============================================================================
 
-fig1 <- ggplot(combined, 
-               aes(x = Tissue, y = log_MDV, group = SampleName)) +
-  
-  # Paired lines (clear but subtle)
-  geom_line(color = "gray70", alpha = 0.6, linewidth = 0.5) +
-  
-  # Points with jitter (KEY FIX)
-  geom_point(aes(fill = Tissue),
-             shape = 21, size = 3,
-             position = position_jitter(width = 0.08)) +
-  
-  # Boxplot (distribution)
-  geom_boxplot(width = 0.5, alpha = 0.25,
-               outlier.shape = NA, color = "black") +
-  
-  # Statistical test
-  stat_compare_means(paired = TRUE, method = "wilcox.test",
-                     label = "p.format", size = 5) +
-  
-  # Labels
-  labs(
-    x = NULL,
-    y = "Log10 MDV copy number",
-    title = "Paired comparison of MDV load between liver and spleen",
-    subtitle = "Each point represents an individual sample; lines connect paired tissues"
-  ) +
-  
-  # Clean theme
-  theme_classic(base_size = 14) +
-  theme(
-    legend.position = "none",
-    plot.title = element_text(face = "bold"),
-    plot.subtitle = element_text(size = 11)
+raw <- readxl::read_excel(input_file, sheet = input_sheet)
+
+required_metadata <- c(
+  "SampleName", "Tissue",
+  "MDV_Rep1", "MDV_Rep2", "MDV_Rep3"
+)
+
+cytokines <- c("IFNG", "IL2", "IL4", "IL6", "IL10", "IL17")
+cytokine_labels <- c(
+  IFNG = "IFN-γ",
+  IL2 = "IL-2",
+  IL4 = "IL-4",
+  IL6 = "IL-6",
+  IL10 = "IL-10",
+  IL17 = "IL-17"
+)
+
+required_cytokine_columns <- unlist(
+  lapply(cytokines, function(x) paste0(x, "_Rep", 1:3))
+)
+
+missing_columns <- setdiff(
+  c(required_metadata, required_cytokine_columns),
+  names(raw)
+)
+
+if (length(missing_columns) > 0) {
+  stop(
+    "The consolidated workbook is missing required columns: ",
+    paste(missing_columns, collapse = ", ")
   )
+}
 
-fig1
-
-
-Figure 2
-##############################################
-##############################################
-# FIGURE 2: CLEAN PAIRWISE COMPARISON
-##############################################
-
-library(rstatix)
-
-cytokines <- c("IFNG","IL2","IL4","IL6","IL10","IL17")
-
-cyto_long <- combined %>%
-  pivot_longer(cols = all_of(cytokines),
-               names_to = "Cytokine",
-               values_to = "Expression")
-
-# Factor order
-cyto_long$Stage <- factor(cyto_long$Stage,
-                          levels = c("Control","Latent","Clinical"))
-
-# ---- PAIRWISE TESTS (CORRECT WAY) ----
-stat_results <- cyto_long %>%
-  group_by(Tissue, Cytokine) %>%
-  pairwise_wilcox_test(Expression ~ Stage,
-                       p.adjust.method = "BH") %>%
-  ungroup()
-
-# ---- ADD y.position ----
-y_pos <- cyto_long %>%
-  group_by(Tissue, Cytokine) %>%
-  summarise(max_val = max(Expression, na.rm = TRUE), .groups = "drop")
-
-stat_results <- stat_results %>%
-  left_join(y_pos, by = c("Tissue","Cytokine")) %>%
-  group_by(Tissue, Cytokine) %>%
+raw <- raw %>%
   mutate(
-    y.position = max_val * (1.2 + 0.15 * row_number()),
-    label = p.adj.signif
+    SampleName = as.character(SampleName),
+    Tissue = factor(Tissue, levels = c("Liver", "Spleen")),
+    across(
+      c(starts_with("MDV_Rep"), matches("^(IFNG|IL2|IL4|IL6|IL10|IL17)_Rep[123]$")),
+      as.numeric
+    )
+  )
+
+# Recalculate all means and technical CVs from the three observations.
+raw <- raw %>%
+  rowwise() %>%
+  mutate(
+    MDV_mean = mean_or_na(c_across(c(MDV_Rep1, MDV_Rep2, MDV_Rep3))),
+    MDV_CV_percent = cv_percent(c_across(c(MDV_Rep1, MDV_Rep2, MDV_Rep3)))
   ) %>%
   ungroup()
 
-# ---- IMPORTANT: REMOVE DUPLICATES ----
-stat_results <- stat_results %>%
-  distinct(Tissue, Cytokine, group1, group2, .keep_all = TRUE)
+for (cyt in cytokines) {
+  rep_cols <- paste0(cyt, "_Rep", 1:3)
 
-# ---- PLOT ----
-fig2 <- ggboxplot(cyto_long,
-                  x = "Stage", y = "Expression",
-                  color = "Stage",
-                  add = "jitter",
-                  palette = c("#4CAF50","#2196F3","#F44336")) +
-  
-  facet_grid(Tissue ~ Cytokine, scales = "free_y") +
-  
-  stat_pvalue_manual(stat_results,
-                     label = "label",
-                     tip.length = 0.01,
-                     size = 3,
-                     hide.ns = TRUE) +
-  
-  theme_classic(base_size = 12) +
-  theme(
-    axis.text.x = element_text(angle = 30, hjust = 1),
-    strip.text = element_text(size = 10)
+  raw[[paste0(cyt, "_Mean")]] <- apply(
+    raw[, rep_cols],
+    1,
+    mean_or_na
   )
 
-fig2
+  raw[[paste0(cyt, "_CV_percent")]] <- apply(
+    raw[, rep_cols],
+    1,
+    cv_percent
+  )
+}
 
-Figure 3
-##############################################
-# FIGURE 3: SCATTER (ALL CYTOKINES)
-##############################################
+# ==============================================================================
+# 5. BIRD-LEVEL SYSTEMIC BURDEN AND DESCRIPTIVE GROUPS
+# ==============================================================================
 
-fig3 <- ggplot(cyto_long,
-               aes(x = log_MDV, y = Expression, color = Tissue)) +
-  geom_point(size = 1.8, alpha = 0.8) +
-  geom_smooth(method = "lm", se = FALSE, size = 0.6) +
-  stat_cor(method = "spearman", size = 3) +
-  facet_wrap(~Cytokine, scales = "free_y", ncol = 3) +
-  labs(x = "Log10 MDV load") +
-  theme_classic(base_size = 11)
+bird_summary <- raw %>%
+  select(SampleName, Tissue, MDV_mean) %>%
+  pivot_wider(names_from = Tissue, values_from = MDV_mean) %>%
+  mutate(
+    MDV_status = if_else(
+      !is.na(Liver) & !is.na(Spleen) & Liver > 0 & Spleen > 0,
+      "MDV-positive",
+      "Control/ND"
+    ),
+    SystemicBurden = if_else(
+      MDV_status == "MDV-positive",
+      sqrt(Liver * Spleen),
+      NA_real_
+    )
+  )
 
-fig3
+systemic_cutoff <- median(
+  bird_summary$SystemicBurden[
+    bird_summary$MDV_status == "MDV-positive"
+  ],
+  na.rm = TRUE
+)
 
-Figure 4
-##############################################
-# FIGURE 4: HEATMAP
-##############################################
+bird_summary <- bird_summary %>%
+  mutate(
+    BurdenGroup = case_when(
+      MDV_status != "MDV-positive" ~ "Control",
+      SystemicBurden <= systemic_cutoff ~ "Lower",
+      SystemicBurden > systemic_cutoff ~ "Higher",
+      TRUE ~ NA_character_
+    ),
+    BurdenGroup = factor(
+      BurdenGroup,
+      levels = c("Control", "Lower", "Higher")
+    )
+  )
 
-heat_df <- combined %>%
-  filter(Stage != "Control") %>%
-  group_by(SampleName) %>%
-  summarise(across(all_of(cytokines), mean, na.rm = TRUE))
+message(
+  "Median systemic-burden cutoff = ",
+  format(round(systemic_cutoff, 2), big.mark = ","),
+  " copies/ng DNA"
+)
+print(table(bird_summary$BurdenGroup, useNA = "ifany"))
 
-heat_mat <- heat_df %>%
-  column_to_rownames("SampleName") %>%
+analysis_wide <- raw %>%
+  left_join(
+    bird_summary %>%
+      select(SampleName, MDV_status, SystemicBurden, BurdenGroup),
+    by = "SampleName"
+  )
+
+# Long table: one row per bird, tissue, and cytokine.
+analysis_long <- analysis_wide %>%
+  select(
+    SampleName, Tissue, MDV_mean, MDV_CV_percent,
+    MDV_status, SystemicBurden, BurdenGroup,
+    all_of(paste0(cytokines, "_Mean"))
+  ) %>%
+  pivot_longer(
+    cols = all_of(paste0(cytokines, "_Mean")),
+    names_to = "Cytokine",
+    values_to = "Expression"
+  ) %>%
+  mutate(
+    Cytokine = str_remove(Cytokine, "_Mean$"),
+    Cytokine = factor(Cytokine, levels = cytokines),
+    CytokineLabel = factor(
+      unname(cytokine_labels[as.character(Cytokine)]),
+      levels = unname(cytokine_labels[cytokines])
+    ),
+    log10_MDV = if_else(MDV_mean > 0, log10(MDV_mean), NA_real_),
+    log2_Expression = log2(Expression)
+  )
+
+# Technical QC table
+technical_qc <- bind_rows(
+  tibble(
+    Target = "MDV",
+    Mean_CV_percent = mean(analysis_wide$MDV_CV_percent, na.rm = TRUE),
+    Maximum_CV_percent = max(analysis_wide$MDV_CV_percent, na.rm = TRUE),
+    Observations_CV_over_10 = sum(analysis_wide$MDV_CV_percent > 10, na.rm = TRUE)
+  ),
+  map_dfr(cytokines, function(cyt) {
+    cv_col <- paste0(cyt, "_CV_percent")
+    tibble(
+      Target = cyt,
+      Mean_CV_percent = mean(analysis_wide[[cv_col]], na.rm = TRUE),
+      Maximum_CV_percent = max(analysis_wide[[cv_col]], na.rm = TRUE),
+      Observations_CV_over_10 = sum(analysis_wide[[cv_col]] > 10, na.rm = TRUE)
+    )
+  })
+)
+
+# ==============================================================================
+# 6. FIGURE 1: PAIRED LIVER–SPLEEN MDV BURDEN
+# ==============================================================================
+
+figure1_data <- analysis_wide %>%
+  filter(MDV_status == "MDV-positive", MDV_mean > 0) %>%
+  mutate(log10_MDV = log10(MDV_mean))
+
+paired_mdv <- figure1_data %>%
+  select(SampleName, Tissue, MDV_mean) %>%
+  pivot_wider(names_from = Tissue, values_from = MDV_mean)
+
+paired_test <- wilcox.test(
+  log10(paired_mdv$Liver),
+  log10(paired_mdv$Spleen),
+  paired = TRUE,
+  exact = FALSE,
+  conf.int = FALSE
+)
+
+figure1 <- ggplot(
+  figure1_data,
+  aes(x = Tissue, y = log10_MDV, group = SampleName)
+) +
+  geom_line(colour = "grey65", linewidth = 0.55, alpha = 0.75) +
+  geom_point(aes(fill = Tissue), shape = 21, size = 2.7, colour = "black") +
+  scale_fill_manual(values = c(Liver = "#E76F51", Spleen = "#2A9D8F")) +
+  annotate(
+    "text",
+    x = 1.5,
+    y = max(figure1_data$log10_MDV, na.rm = TRUE) * 1.04,
+    label = paste0("Paired Wilcoxon P = ", format_p(paired_test$p.value)),
+    size = 3.5
+  ) +
+  labs(
+    title = "Paired comparison of MDV burden between liver and spleen",
+    x = NULL,
+    y = expression(Log[10]~MDV~copies/ng~DNA)
+  ) +
+  publication_theme +
+  theme(legend.position = "none")
+
+save_plot(figure1, "Figure_1_Paired_MDV_Load", 6.2, 5.5)
+
+# ==============================================================================
+# 7. FIGURE 2: CYTOKINE EXPRESSION BY SYSTEMIC BURDEN GROUP
+# ==============================================================================
+
+kw_statistics <- analysis_long %>%
+  filter(!is.na(BurdenGroup), !is.na(Expression)) %>%
+  group_by(Tissue, Cytokine, CytokineLabel) %>%
+  summarise(
+    n = n(),
+    p_value = if (
+      n_distinct(BurdenGroup[!is.na(Expression)]) >= 2
+    ) {
+      kruskal.test(Expression ~ BurdenGroup)$p.value
+    } else {
+      NA_real_
+    },
+    y_position = max(Expression, na.rm = TRUE) * 1.08,
+    .groups = "drop"
+  ) %>%
+  group_by(Tissue) %>%
+  mutate(q_value = p.adjust(p_value, method = "BH")) %>%
+  ungroup() %>%
+  mutate(
+    label = paste0("KW q = ", format_p(q_value)),
+    x_position = 2.88
+  )
+
+figure2_caption <- paste0(
+  "Descriptive groups use the median bird-level systemic burden index ",
+  "(geometric-mean cutoff = ",
+  format(round(systemic_cutoff, 2), big.mark = ","),
+  " copies/ng); n = ",
+  sum(bird_summary$BurdenGroup == "Control", na.rm = TRUE),
+  " controls, ",
+  sum(bird_summary$BurdenGroup == "Lower", na.rm = TRUE),
+  " lower, and ",
+  sum(bird_summary$BurdenGroup == "Higher", na.rm = TRUE),
+  " higher."
+)
+
+if (show_demonstration_disclaimer) {
+  figure2_caption <- paste(figure2_caption, cytokine_data_status)
+}
+
+figure2 <- ggplot(
+  analysis_long,
+  aes(x = BurdenGroup, y = Expression, fill = BurdenGroup)
+) +
+  geom_boxplot(
+    width = 0.62,
+    outlier.shape = NA,
+    alpha = 0.48,
+    colour = "grey35",
+    linewidth = 0.55
+  ) +
+  geom_jitter(
+    aes(colour = BurdenGroup),
+    width = 0.12,
+    size = 1.8,
+    alpha = 0.9
+  ) +
+  geom_text(
+    data = kw_statistics,
+    aes(x = x_position, y = y_position, label = label),
+    inherit.aes = FALSE,
+    hjust = 1,
+    vjust = 0,
+    size = 2.7
+  ) +
+  facet_grid(
+    Tissue ~ CytokineLabel,
+    scales = "free_y",
+    switch = "y"
+  ) +
+  scale_fill_manual(
+    values = c(Control = "#6A994E", Lower = "#2C7FB8", Higher = "#D95F4C")
+  ) +
+  scale_colour_manual(
+    values = c(Control = "#4F7A3A", Lower = "#17639A", Higher = "#B83B2C")
+  ) +
+  scale_y_continuous(expand = expansion(mult = c(0.05, 0.18))) +
+  labs(
+    title = "GAPDH-normalized cytokine expression by systemic MDV burden",
+    x = NULL,
+    y = expression(Relative~expression~(2^{-Delta*C[t]})),
+    caption = figure2_caption
+  ) +
+  publication_theme +
+  theme(
+    legend.position = "none",
+    axis.text.x = element_text(angle = 30, hjust = 1),
+    strip.placement = "outside",
+    plot.caption = element_text(size = 7.5, hjust = 0.5)
+  )
+
+save_plot(figure2, "Figure_2_Cytokine_by_Systemic_Burden", 15.5, 7.8)
+
+# ==============================================================================
+# 8. FIGURE 3: TISSUE-SPECIFIC CORRELATIONS
+# ==============================================================================
+
+association_data <- analysis_long %>%
+  filter(MDV_status == "MDV-positive", MDV_mean > 0)
+
+correlation_statistics <- association_data %>%
+  group_by(Tissue, Cytokine, CytokineLabel) %>%
+  summarise(
+    n = sum(complete.cases(log10_MDV, Expression)),
+    rho = cor(
+      log10_MDV,
+      Expression,
+      method = "spearman",
+      use = "complete.obs"
+    ),
+    p_value = cor.test(
+      log10_MDV,
+      Expression,
+      method = "spearman",
+      exact = FALSE
+    )$p.value,
+    x_position = min(log10_MDV, na.rm = TRUE),
+    y_max = max(Expression, na.rm = TRUE),
+    y_min = min(Expression, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  group_by(Tissue) %>%
+  mutate(q_value = p.adjust(p_value, method = "BH")) %>%
+  ungroup() %>%
+  group_by(Cytokine) %>%
+  arrange(Tissue, .by_group = TRUE) %>%
+  mutate(
+    line_number = row_number(),
+    y_position = y_max - (line_number - 1) *
+      0.13 * pmax(y_max - y_min, 0.01),
+    label = paste0(
+      Tissue, ": ρ = ", sprintf("%.2f", rho),
+      ", q = ", format_p(q_value)
+    )
+  ) %>%
+  ungroup()
+
+figure3 <- ggplot(
+  association_data,
+  aes(x = log10_MDV, y = Expression, colour = Tissue)
+) +
+  geom_point(size = 2.1, alpha = 0.85) +
+  geom_smooth(
+    method = "lm",
+    formula = y ~ x,
+    se = FALSE,
+    linewidth = 0.8
+  ) +
+  geom_text(
+    data = correlation_statistics,
+    aes(
+      x = x_position,
+      y = y_position,
+      label = label,
+      colour = Tissue
+    ),
+    inherit.aes = FALSE,
+    hjust = 0,
+    vjust = 1,
+    size = 2.8,
+    show.legend = FALSE
+  ) +
+  facet_wrap(~ CytokineLabel, scales = "free_y", ncol = 3) +
+  scale_colour_manual(values = c(Liver = "#E76F51", Spleen = "#2A9D8F")) +
+  scale_y_continuous(expand = expansion(mult = c(0.05, 0.16))) +
+  labs(
+    title = "Tissue-specific associations between MDV burden and cytokine expression",
+    subtitle = "Statistics are Spearman correlations; lines show fitted trends",
+    x = expression(Log[10]~MDV~copies/ng~DNA),
+    y = expression(Relative~expression~(2^{-Delta*C[t]})),
+    colour = "Tissue",
+    caption = if (show_demonstration_disclaimer) cytokine_data_status else NULL
+  ) +
+  publication_theme
+
+save_plot(figure3, "Figure_3_MDV_Cytokine_Associations", 10.5, 7.2)
+
+# ==============================================================================
+# 9. FIGURE 4: TISSUE-RESOLVED HEATMAP
+# ==============================================================================
+
+heatmap_long <- association_data %>%
+  mutate(log2_expression = log2(Expression)) %>%
+  group_by(Tissue, Cytokine) %>%
+  mutate(Z = as.numeric(scale(log2_expression))) %>%
+  ungroup()
+
+heatmap_order <- heatmap_long %>%
+  distinct(SampleName, Tissue, SystemicBurden, BurdenGroup) %>%
+  arrange(SystemicBurden, SampleName, Tissue) %>%
+  mutate(RowName = paste(SampleName, Tissue, sep = " | "))
+
+heatmap_matrix <- heatmap_long %>%
+  mutate(RowName = paste(SampleName, Tissue, sep = " | ")) %>%
+  select(RowName, Cytokine, Z) %>%
+  pivot_wider(names_from = Cytokine, values_from = Z) %>%
+  column_to_rownames("RowName") %>%
   as.matrix()
 
-pheatmap(scale(heat_mat),
-         fontsize = 10,
-         main = "Cytokine expression patterns in affected chickens")
+heatmap_matrix <- heatmap_matrix[
+  heatmap_order$RowName,
+  cytokines,
+  drop = FALSE
+]
 
+colnames(heatmap_matrix) <- unname(
+  cytokine_labels[colnames(heatmap_matrix)]
+)
 
-##############################################
-# MDV EFFECT TABLE (FINAL)
-##############################################
+heatmap_annotation <- heatmap_order %>%
+  select(RowName, Tissue, BurdenGroup, SystemicBurden) %>%
+  column_to_rownames("RowName")
 
-mdv_results <- lapply(cytokines, function(cyto){
-  
-  model <- lmer(
-    as.formula(paste0(cyto, " ~ scale(log_MDV) + Tissue + (1|SampleName)")),
-    data = combined
+heatmap_colours <- colorRampPalette(
+  rev(RColorBrewer::brewer.pal(11, "RdBu"))
+)(101)
+
+annotation_colours <- list(
+  Tissue = c(Liver = "#E76F51", Spleen = "#2A9D8F"),
+  BurdenGroup = c(Lower = "#2C7FB8", Higher = "#D95F4C")
+)
+
+heatmap_args <- list(
+  mat = heatmap_matrix,
+  color = heatmap_colours,
+  breaks = seq(-2.5, 2.5, length.out = 102),
+  cluster_rows = FALSE,
+  cluster_cols = TRUE,
+  annotation_row = heatmap_annotation,
+  annotation_colors = annotation_colours,
+  border_color = "grey85",
+  fontsize = 9,
+  fontsize_row = 7,
+  fontsize_col = 10,
+  main = "Tissue-resolved cytokine-expression profiles in MDV-positive chickens",
+  angle_col = "45",
+  legend_breaks = c(-2, -1, 0, 1, 2)
+)
+
+pdf_device <- if (capabilities("cairo")) grDevices::cairo_pdf else grDevices::pdf
+pdf_device(
+  file.path(results_dir, "Figure_4_Tissue_Resolved_Heatmap.pdf"),
+  width = 9,
+  height = 11
+)
+do.call(pheatmap::pheatmap, heatmap_args)
+dev.off()
+
+png(
+  file.path(results_dir, "Figure_4_Tissue_Resolved_Heatmap.png"),
+  width = 9,
+  height = 11,
+  units = "in",
+  res = 600
+)
+do.call(pheatmap::pheatmap, heatmap_args)
+dev.off()
+
+# ==============================================================================
+# 10. MIXED-EFFECTS MODELS
+# ==============================================================================
+
+mixed_data <- association_data %>%
+  mutate(
+    log10_MDV_centered = log10_MDV - mean(log10_MDV, na.rm = TRUE),
+    Tissue = relevel(factor(Tissue), ref = "Liver")
   )
-  
-  coef <- summary(model)$coefficients
-  
-  data.frame(
-    Cytokine = cyto,
-    Estimate = coef["scale(log_MDV)", "Estimate"],
-    SE = coef["scale(log_MDV)", "Std. Error"],
-    p_value = coef["scale(log_MDV)", "Pr(>|t|)"]
-  )
-}) %>% bind_rows()
 
-print(mdv_results)
+fit_one_cytokine <- function(cytokine_code) {
+  d <- mixed_data %>%
+    filter(Cytokine == cytokine_code) %>%
+    droplevels()
+
+  control_settings <- lmerControl(
+    optimizer = "bobyqa",
+    optCtrl = list(maxfun = 200000)
+  )
+
+  full_model <- lmer(
+    log2_Expression ~ log10_MDV_centered + Tissue + (1 | SampleName),
+    data = d,
+    REML = FALSE,
+    control = control_settings
+  )
+
+  reduced_model <- lmer(
+    log2_Expression ~ Tissue + (1 | SampleName),
+    data = d,
+    REML = FALSE,
+    control = control_settings
+  )
+
+  interaction_model <- lmer(
+    log2_Expression ~ log10_MDV_centered * Tissue + (1 | SampleName),
+    data = d,
+    REML = FALSE,
+    control = control_settings
+  )
+
+  load_lrt <- anova(reduced_model, full_model, refit = FALSE)
+  interaction_lrt <- anova(full_model, interaction_model, refit = FALSE)
+
+  beta <- unname(fixef(full_model)["log10_MDV_centered"])
+  beta_se <- sqrt(vcov(full_model)[
+    "log10_MDV_centered",
+    "log10_MDV_centered"
+  ])
+  beta_low <- beta - 1.96 * beta_se
+  beta_high <- beta + 1.96 * beta_se
+
+  tissue_term <- grep(
+    "^Tissue",
+    names(fixef(full_model)),
+    value = TRUE
+  )[1]
+  tissue_beta <- unname(fixef(full_model)[tissue_term])
+  tissue_se <- sqrt(vcov(full_model)[tissue_term, tissue_term])
+  tissue_low <- tissue_beta - 1.96 * tissue_se
+  tissue_high <- tissue_beta + 1.96 * tissue_se
+
+  variance_table <- as.data.frame(VarCorr(full_model))
+  random_variance <- variance_table$vcov[
+    variance_table$grp == "SampleName"
+  ][1]
+  residual_variance <- sigma(full_model)^2
+  icc <- random_variance / (random_variance + residual_variance)
+
+  interaction_term <- grep(
+    "log10_MDV_centered.*Tissue|Tissue.*log10_MDV_centered",
+    names(fixef(interaction_model)),
+    value = TRUE
+  )[1]
+
+  result <- tibble(
+    Cytokine = cytokine_code,
+    CytokineLabel = unname(cytokine_labels[cytokine_code]),
+    Beta_log2_per_10fold_MDV = beta,
+    SE = beta_se,
+    Beta_95CI_low = beta_low,
+    Beta_95CI_high = beta_high,
+    Fold_change_per_10fold_MDV = 2^beta,
+    Fold_change_95CI_low = 2^beta_low,
+    Fold_change_95CI_high = 2^beta_high,
+    LRT_chi_square = load_lrt$Chisq[2],
+    LRT_p_value = load_lrt$`Pr(>Chisq)`[2],
+    Spleen_vs_liver_beta_log2 = tissue_beta,
+    Spleen_vs_liver_fold_change = 2^tissue_beta,
+    Spleen_effect_95CI_low = 2^tissue_low,
+    Spleen_effect_95CI_high = 2^tissue_high,
+    Random_intercept_variance = random_variance,
+    Residual_variance = residual_variance,
+    ICC = icc,
+    AIC = AIC(full_model),
+    BIC = BIC(full_model),
+    Singular = isSingular(full_model, tol = 1e-5),
+    Interaction_beta_log2 = unname(
+      fixef(interaction_model)[interaction_term]
+    ),
+    Interaction_LRT_chi_square = interaction_lrt$Chisq[2],
+    Interaction_p_value = interaction_lrt$`Pr(>Chisq)`[2]
+  )
+
+  list(
+    result = result,
+    full_model = full_model,
+    interaction_model = interaction_model
+  )
+}
+
+model_fits <- setNames(
+  lapply(cytokines, fit_one_cytokine),
+  cytokines
+)
+
+mixed_model_results <- bind_rows(
+  lapply(model_fits, function(x) x$result)
+) %>%
+  mutate(
+    BH_q_value = p.adjust(LRT_p_value, method = "BH"),
+    Interaction_BH_q_value = p.adjust(
+      Interaction_p_value,
+      method = "BH"
+    ),
+    Direction = if_else(
+      Fold_change_per_10fold_MDV >= 1,
+      "Higher expression",
+      "Lower expression"
+    )
+  )
+
+# Export plain-text model summaries.
+sink(file.path(results_dir, "Mixed_Model_Full_Summaries.txt"))
+for (cyt in cytokines) {
+  cat("\n\n============================================================\n")
+  cat("CYTOKINE:", cyt, "\n")
+  cat("============================================================\n")
+  print(summary(model_fits[[cyt]]$full_model))
+}
+sink()
+
+# ==============================================================================
+# 11. FIGURE 5: MIXED-MODEL FOREST PLOT
+# ==============================================================================
+
+figure5_data <- mixed_model_results %>%
+  mutate(
+    CytokineLabel = factor(
+      CytokineLabel,
+      levels = rev(unname(cytokine_labels[cytokines]))
+    )
+  )
+
+figure5 <- ggplot(
+  figure5_data,
+  aes(
+    x = Fold_change_per_10fold_MDV,
+    y = CytokineLabel
+  )
+) +
+  geom_vline(
+    xintercept = 1,
+    linetype = "dashed",
+    colour = "grey45",
+    linewidth = 0.7
+  ) +
+  geom_errorbarh(
+    aes(
+      xmin = Fold_change_95CI_low,
+      xmax = Fold_change_95CI_high
+    ),
+    height = 0.18,
+    linewidth = 0.85
+  ) +
+  geom_point(shape = 21, fill = "white", size = 3.4, stroke = 0.9) +
+  scale_x_log10() +
+  labs(
+    title = "Mixed-effects associations between MDV burden and cytokine expression",
+    subtitle = "Fold change per 10-fold increase in MDV copies/ng DNA",
+    x = "Expression fold change (log scale)",
+    y = NULL,
+    caption = if (show_demonstration_disclaimer) cytokine_data_status else NULL
+  ) +
+  publication_theme +
+  theme(panel.grid.major.y = element_blank())
+
+save_plot(figure5, "Figure_5_Mixed_Model_Forest_Plot", 7.4, 5.0)
+
+# ==============================================================================
+# 12. EXPORT RESULTS
+# ==============================================================================
+
+pairwise_mdv_data <- paired_mdv %>%
+  mutate(
+    Liver_log10 = log10(Liver),
+    Spleen_log10 = log10(Spleen)
+  )
+
+analysis_tables <- list(
+  Bird_Summary = bird_summary,
+  Technical_QC = technical_qc,
+  Paired_MDV_Data = pairwise_mdv_data,
+  Kruskal_Wallis = kw_statistics,
+  Tissue_Correlations = correlation_statistics,
+  Mixed_Model_Results = mixed_model_results,
+  Analysis_Wide = analysis_wide,
+  Analysis_Long = analysis_long
+)
+
+writexl::write_xlsx(
+  analysis_tables,
+  file.path(results_dir, "MDV_Final_Analysis_Tables.xlsx")
+)
+
+write_csv(
+  mixed_model_results,
+  file.path(results_dir, "Mixed_Model_Results.csv")
+)
+write_csv(
+  correlation_statistics,
+  file.path(results_dir, "Tissue_Correlation_Results.csv")
+)
+write_csv(
+  kw_statistics,
+  file.path(results_dir, "Kruskal_Wallis_Results.csv")
+)
+
+message("\nAnalysis completed.")
+message("Input file: ", input_file)
+message("Results folder: ", results_dir)
+message(
+  "Systemic-burden cutoff used for descriptive grouping: ",
+  format(round(systemic_cutoff, 2), big.mark = ","),
+  " copies/ng DNA"
+)
